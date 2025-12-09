@@ -1,0 +1,20 @@
+{
+	"folders": [
+		{
+			"path": "../../esri2svg"
+		},
+		{
+			"path": "../../ozimage"
+		},
+		{
+			"path": ".."
+		}
+	],
+	"settings": {
+		"editor.quickSuggestions": {
+			"comments": "off",
+			"strings": "off",
+			"other": "off"
+		}
+	}
+}
