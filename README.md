@@ -1,1 +1,1 @@
-A simple microservice REST API built with Rust and Axum to fetch, re-organise and serve content from a Wordpress site to a frontend built with React and Next.js. 
+A simple microservice REST API built with Rust and Axum to fetch, re-organise and serve content from a Wordpress site to a frontend built with React and Next.js. Content includes GPS coordinates for cities identified in content (although not always accurately - another todo). Next move is to move data to an sqlite database to improve performance.
