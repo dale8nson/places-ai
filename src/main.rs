@@ -1104,7 +1104,7 @@ async fn get_posts(State(state): State<Arc<AppState>>) -> Json<Vec<Post>> {
         .await
         .ok()
         .unwrap_or_default();
-    println!("data: {data:?}");
+    // println!("data: {data:?}");
     data.sort_by(|p1, p2| {
         let d1 = chrono::NaiveDateTime::parse_from_str(p1.date.as_str(), "%Y-%m-%dT%H:%M:%S")
             .ok()
@@ -1114,7 +1114,7 @@ async fn get_posts(State(state): State<Arc<AppState>>) -> Json<Vec<Post>> {
             .unwrap_or_default();
         d2.cmp(&d1)
     });
-    println!("data: {data:?}");
+    // println!("data: {data:?}");
     let value = Json(data);
     
     value
