@@ -20,6 +20,5 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends libssl3 ca-certificates libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/data /app/data
-COPY --from=builder /app/db /app/db
 COPY --from=builder /app/target/release/places-ai /usr/local/bin
 ENTRYPOINT ["/usr/local/bin/places-ai"]
