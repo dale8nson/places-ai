@@ -724,6 +724,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .route("/image/{id}", get(get_image))
         .route("/posts/featured", get(get_featured_posts))
         .route("/images", get(get_feature_images))
+        .route("/ping", get(ping))
         .with_state(state)
         .route_layer(cors);
 
@@ -1086,7 +1087,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 #[debug_handler]
 async fn get_posts(State(state): State<Arc<AppState>>) -> Json<Vec<Post>> {
     let mut data = Posts::find()
-        .select_only()
+        // .select_only()
         .columns([
             post::Column::Id,
             post::Column::Date,
@@ -1102,7 +1103,8 @@ async fn get_posts(State(state): State<Arc<AppState>>) -> Json<Vec<Post>> {
         .all(&*state.db)
         .await
         .ok()
-        .unwrap();
+        .unwrap_or_default();
+    println!("data: {data:?}");
     data.sort_by(|p1, p2| {
         let d1 = chrono::NaiveDateTime::parse_from_str(p1.date.as_str(), "%Y-%m-%dT%H:%M:%S")
             .ok()
@@ -1112,7 +1114,9 @@ async fn get_posts(State(state): State<Arc<AppState>>) -> Json<Vec<Post>> {
             .unwrap_or_default();
         d2.cmp(&d1)
     });
+    println!("data: {data:?}");
     let value = Json(data);
+    
     value
 }
 
@@ -1291,6 +1295,10 @@ async fn get_menu_items(State(state): State<Arc<AppState>>) -> Json<Vec<MenuItem
     let menu_items = MenuItems::find().order_by_asc(menu_item::Column::MenuOrder).all(&*state.db).await.unwrap_or_default();
     println!("menu_items: {menu_items:?}");
     Json(MenuItems::find().order_by_asc(menu_item::Column::MenuOrder).all(&*state.db).await.unwrap_or_default())
+}
+
+async fn ping() -> String {
+    "pong".to_string()
 }
 
 // #[debug_handler]
