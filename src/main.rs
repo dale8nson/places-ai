@@ -1115,7 +1115,7 @@ async fn get_posts(State(state): State<Arc<AppState>>) -> Json<Vec<Post>> {
         d2.cmp(&d1)
     });
     // println!("data: {data:?}");
-    let value = Json(data);
+    let value = Json::<Vec<Post>>(data);
     
     value
 }
