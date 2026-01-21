@@ -9,50 +9,40 @@ use axum::{
 };
 use axum_macros::debug_handler;
 use bytes::Bytes;
-use chrono::{Date, DateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use csv::ReaderBuilder;
 // use regex::Regex;
 use b64_ct::{STANDARD, ToBase64};
-use little_exif::{
-    exif_tag::ExifTag,
-    exif_tag_format::{INT32U, RATIONAL64U},
-    filetype::FileExtension,
-    metadata::Metadata,
-};
-use pcre2::bytes::{Match, Regex};
+use pcre2::bytes::Regex;
 use serde::{Deserialize, Serialize};
 
 use sea_orm::{
     ActiveValue::Set,
-    ColumnTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend,
+    ColumnTrait, ConnectOptions, Database, DatabaseConnection,
     EntityTrait, FromQueryResult, JsonField, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
 };
 
 use entity::{
-    city::Entity as Cities, city::Model as City, image::Image, menu_item::Entity as MenuItems,
+    city::Entity as Cities, image::Image, menu_item::Entity as MenuItems,
     menu_item::Model as MenuItem, post::Entity as Posts, post::Model as Post, tp5d::{Entity as Tp5ds, Model as TP5D}, 
 };
-use serde_json::{Map, Value};
+use serde_json::Value;
 
-use core::time;
-use std::{ cmp::{Ordering, PartialOrd}, collections::{BTreeMap, BTreeSet, HashMap, HashSet}, error::Error, fmt::{self, Display}, io::Read, ops::Index, path::absolute, str::{Chars, FromStr}, sync::Arc, time::Duration
+use std::{ cmp::{Ordering, PartialOrd}, collections::{BTreeMap, BTreeSet}, error::Error, io::Read, sync::Arc, time::Duration
 };
 use tokio::net::TcpListener;
-use tower_http::{
-    cors::{Any, CorsLayer},
-    trace::TraceLayer,
-};
+use tower_http::cors::{Any, CorsLayer};
 
-use log::{debug, info, warn};
+use log::info;
 
 use entity::record::Record;
 
-use dotenv::{dotenv, from_filename};
+use dotenv::from_filename;
 
 use random;
 use random::Source;
 
-use crate::entity::{menu_item, post, tp5d};
+use crate::entity::{menu_item, post};
 
 // const DATABASE_URL: &str = "sqlite::memory:";
 const DB_NAME: &str = "ozimage";
@@ -473,7 +463,7 @@ async fn fetch_img_meta(id: u64, client: &reqwest::Client, username: String, pas
         .as_bytes()
         .to_base64(STANDARD);
     println!("fetch_img_meta: {url}");
-    let mut res = client
+    let res = client
         .get(url.as_str())
         .header("User-Agent", "curl/8.0.0")
         .header("Authorization", format!("Basic {b64}"))
@@ -726,7 +716,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             );
 
             let mut coord_set = BTreeSet::<Record<String, (f32, f32)>>::new();
-            let mut coords = Vec::<Record<String, (f32, f32)>>::new();
+            let coords = Vec::<Record<String, (f32, f32)>>::new();
 
             let mut scan_text = |text: &str| -> Result<(), Box<dyn Error>> {
                 for result in re.find_iter(text.as_bytes()) {
@@ -785,8 +775,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
             println!("fetching featured_media {featured_media}");
 
-            let mut fg = Vec::<u8>::new();
-            let mut bg = Vec::<u8>::new();
+            let fg = Vec::<u8>::new();
+            let bg = Vec::<u8>::new();
 
             if let Some((img_bytes, Some(mime_type))) = fetch_img(featured_media, &client, username.clone(), password.clone()).await? {
                 
@@ -970,7 +960,7 @@ async fn get_post_data(State(state): State<Arc<AppState>>, Path(id): Path<u64>) 
         ]);
 
     // println!("{}", res.build(DbBackend::Sqlite).to_string());
-    let mut value: Json<post::Model>;
+    let value: Json<post::Model>;
     let query = res.one(&*state.db).await.ok();
     if let Some(Some(data)) = query {
         value = Json(data);

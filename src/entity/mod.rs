@@ -72,7 +72,7 @@ pub mod record {
 pub mod city {
 
     use sea_orm::entity::prelude::*;
-    use serde::{Deserialize, Serialize};
+    use serde::Serialize;
 
     #[sea_orm::model]
     #[derive(Clone, Debug, DeriveEntityModel, PartialEq, Serialize)]
@@ -127,7 +127,7 @@ pub mod post {
     use super::image::Image;
     use super::record::Record;
     use sea_orm::{JsonField, entity::prelude::*};
-    use serde::{Deserialize, Serialize};
+    use serde::Serialize;
 
     // impl PartialEq for Image {
     //   fn cmp(&self, other: &Self) -> Ordering {
