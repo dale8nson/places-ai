@@ -148,7 +148,10 @@ pub mod post {
         pub title: String,
         pub content: String,
         pub image: JsonField<Image>,
+        pub fg: String,
+        pub bg: String,
         pub excerpt: String,
+        pub continent: String,
         pub categories: JsonField<BTreeMap<String, u32>>,
         pub tags: JsonField<BTreeMap<String, u32>>,
         pub coords: JsonField<Option<Vec<Record<String, (f32, f32)>>>>,
@@ -167,7 +170,10 @@ pub mod post {
                 title: String::default(),
                 content: String::default(),
                 image: JsonField::<Image>(Image::default()),
+                fg: String::default(),
+                bg: String::default(),
                 excerpt: String::default(),
+                continent: String::default(),
                 categories: JsonField::<BTreeMap<String, u32>>(BTreeMap::<String, u32>::default()),
                 tags: JsonField::<BTreeMap<String, u32>>(BTreeMap::<String, u32>::default()),
                 coords: JsonField::<Option<Vec<Record<String, (f32, f32)>>>>(None),
@@ -175,6 +181,7 @@ pub mod post {
         }
     }
 }
+
 
 pub mod menu_item {
     use sea_orm::{JsonField, entity::prelude::*};
@@ -198,4 +205,31 @@ pub mod menu_item {
     }
 
     impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod tp5d {
+    use sea_orm::entity::prelude::*;
+    use serde::{Deserialize, Serialize};
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, DeriveEntityModel, PartialEq, Serialize, Deserialize)]
+    #[sea_orm(table_name = "tp5d")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i32,
+        pub fg: String,
+        pub bg: String,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+
+    impl Default for Model {
+        fn default() -> Self {
+            Model {
+                id: -1i32,
+                fg: "".to_string(),
+                bg: "".to_string()
+            }
+        }
+    }
 }

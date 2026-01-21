@@ -2,14 +2,14 @@ mod entity;
 
 use axum::{
     Json, Router,
-    extract::{MatchedPath, Path, Query, State},
-    http::{self, Request},
-    routing::{get, post},
+    extract::{DefaultBodyLimit, Path, Query, State},
+    http::{self},
+    routing::get,
     serve,
 };
 use axum_macros::debug_handler;
 use bytes::Bytes;
-use chrono::TimeZone;
+use chrono::{Date, DateTime, TimeZone, Utc};
 use csv::ReaderBuilder;
 // use regex::Regex;
 use b64_ct::{STANDARD, ToBase64};
@@ -24,34 +24,26 @@ use serde::{Deserialize, Serialize};
 
 use sea_orm::{
     ActiveValue::Set,
-    ColumnTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend, DbErr,
-    EntityTrait, JsonField, QueryFilter, QueryOrder, QuerySelect, QueryTrait, SqlxSqliteConnector,
-    sea_query::{QueryStatement, SelectStatement},
+    ColumnTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend,
+    EntityTrait, FromQueryResult, JsonField, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
 };
-use sea_orm_migration::manager::SchemaManager;
 
 use entity::{
     city::Entity as Cities, city::Model as City, image::Image, menu_item::Entity as MenuItems,
-    menu_item::Model as MenuItem, post::Entity as Posts, post::Model as Post,
+    menu_item::Model as MenuItem, post::Entity as Posts, post::Model as Post, tp5d::{Entity as Tp5ds, Model as TP5D}, 
 };
-use tracing::Subscriber;
+use serde_json::{Map, Value};
 
-use std::{
-    cmp::{Ordering, PartialOrd},
-    collections::{BTreeMap, BTreeSet, HashSet},
-    error::Error,
-    fmt::{self, Display},
-    io::Read,
-    ops::Index,
-    path::absolute,
-    str::{Chars, FromStr},
-    sync::Arc,
+use core::time;
+use std::{ cmp::{Ordering, PartialOrd}, collections::{BTreeMap, BTreeSet, HashMap, HashSet}, error::Error, fmt::{self, Display}, io::Read, ops::Index, path::absolute, str::{Chars, FromStr}, sync::Arc, time::Duration
 };
 use tokio::net::TcpListener;
 use tower_http::{
     cors::{Any, CorsLayer},
     trace::TraceLayer,
 };
+
+use log::{debug, info, warn};
 
 use entity::record::Record;
 
@@ -60,19 +52,21 @@ use dotenv::{dotenv, from_filename};
 use random;
 use random::Source;
 
-use crate::entity::{menu_item, post};
+use crate::entity::{menu_item, post, tp5d};
 
-const DATABASE_URL: &str = "sqlite::memory:";
+// const DATABASE_URL: &str = "sqlite::memory:";
 const DB_NAME: &str = "ozimage";
+const DEFAULT_POSTS_PER_PAGE: u64 = 24;
+const MAX_POSTS_PER_PAGE: u64 = 50;
 
-async fn open_db() -> Result<DatabaseConnection, DbErr> {
-    let db = SqlxSqliteConnector::connect(ConnectOptions::new(DATABASE_URL)).await?;
-    Ok(db)
-}
+// async fn open_db() -> Result<DatabaseConnection, DbErr> {
+//     let db = SqlxSqliteConnector::connect(ConnectOptions::new(DATABASE_URL)).await?;
+//     Ok(db)
+// }
 
 #[derive(Debug, Deserialize, Clone)]
 struct Place {
-    pub id: u32,
+    pub id: u64,
     pub city: String,
     pub city_ascii: String,
     pub lat: f32,
@@ -82,17 +76,17 @@ struct Place {
     pub iso3: String,
     pub admin_name: String,
     pub capital: String,
-    pub population: u32,
+    pub population: u64,
 }
 
 // #[derive(Debug, Serialize, Clone)]
 // struct City {
-// id: u32,
+// id: u64,
 // name: String,
 // country: String,
 // capital: String,
 // admin_name: String,
-// population: u32,
+// population: u64,
 // lat: f32,
 // lng: f32,
 // }
@@ -219,25 +213,22 @@ impl PartialOrd for Coord {
 
 // #[derive(Debug, Deserialize, Serialize)]
 // struct MenuItem {
-//     id: u32,
+//     id: u64,
 //     title: Record<String, String>,
 //     status: String,
 //     url: String,
 //     attr_title: String,
 //     description: String,
-//     parent: u32,
-//     menu_order: u32,
+//     parent: u64,
+//     menu_order: u64,
 //     target: String,
 //     classes: Vec<String>,
 //     _links:
 
 // }
 
-async fn parse_csv(
-    db: DatabaseConnection,
-) -> Result<(Vec<entity::city::Model>, Vec<Coord>), Box<dyn Error>> {
+async fn parse_csv(db: DatabaseConnection) -> Result<Vec<entity::city::Model>, Box<dyn Error>> {
     let mut cities = Vec::<entity::city::Model>::new();
-    let mut coords = Vec::<Coord>::new();
     let reader = ReaderBuilder::new()
         .has_headers(true)
         .from_path("data/worldcities.csv")?;
@@ -256,14 +247,14 @@ async fn parse_csv(
                     admin_name,
                     population,
                     ..
-                } = place.clone();
+                } = place;
                 let row = entity::city::ActiveModel {
-                    id: Set(id),
+                    id: Set(id as u32),
                     name: Set(name.clone()),
-                    country: Set(country),
-                    capital: Set(capital),
-                    admin_name: Set(admin_name),
-                    population: Set(population),
+                    country: Set(country.clone()),
+                    capital: Set(capital.clone()),
+                    admin_name: Set(admin_name.clone()),
+                    population: Set(population as u32),
                     lat: Set(lat),
                     lng: Set(lng),
                 };
@@ -286,10 +277,15 @@ async fn parse_csv(
                 //     },
                 // );
 
-                coords.push(Coord {
+                cities.push(entity::city::Model {
+                    id: id as u32,
+                    name,
+                    country,
+                    capital,
+                    admin_name,
+                    population: population as u32,
                     lat,
                     lng,
-                    label: name,
                 });
             }
             Err(e) => {
@@ -300,10 +296,31 @@ async fn parse_csv(
         }
     }
 
-    coords.sort();
-
-    Ok((cities, coords))
+    Ok(cities)
 }
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Menu {
+        pub id: u32,
+        pub slug: String,
+    }
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct WPMenuItem {
+    pub id: u32,
+    pub title: menu_item::Html,
+    pub parent: u32,
+    pub menus: u32,
+    pub menu_order: u32,
+    pub url: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct MenuMeta {
+    id: u64,
+    slug: String,
+}
+
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct Title {
@@ -316,31 +333,43 @@ struct Html {
     protected: bool,
 }
 
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct WPPost {
-    id: u32,
+    id: u64,
     date: String,
     slug: String,
     link: String,
-    author: u32,
+    author: u64,
     title: Title,
     content: Html,
-    featured_media: u32,
+    featured_media: u64,
     excerpt: Html,
-    categories: Vec<u32>,
-    tags: Vec<u32>,
+    meta: Value,
+    categories: Vec<u64>,
+    tags: Vec<u64>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 struct Media {
     alt_text: Option<String>,
     mime_type: Option<String>,
     source_url: Option<String>,
 }
 
+impl Default for Media {
+    fn default() -> Self {
+        Self {
+            alt_text: Some(String::new()),
+            mime_type: Some(String::new()),
+            source_url: Some(String::new())
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, PartialEq, PartialOrd, Eq, Ord, Clone)]
 struct Label {
-    id: u32,
+    id: u64,
     name: String,
 }
 
@@ -353,41 +382,79 @@ struct EXIF {
 // #[derive(Debug, Deserialize, Serialize, Clone)]
 // struct Image {
 //     b64: String,
-//     width: u32,
-//     height: u32,
+//     width: u64,
+//     height: u64,
 //     alt: String,
 //     coords: Option<Record<String, (f32, f32)>>,
 // }
 
 #[derive(Debug, Serialize, Clone)]
 struct PostData {
-    id: u32,
+    id: u64,
     date: String,
     title: String,
     slug: String,
     excerpt: String,
     image: Option<Image>,
     link: String,
-    categories: BTreeMap<String, u32>,
-    tags: BTreeMap<String, u32>,
+    categories: BTreeMap<String, u64>,
+    tags: BTreeMap<String, u64>,
     coords: Vec<Record<String, (f32, f32)>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct PostUpdate {
-    post_id: u32,
+    post_id: u64,
     post: WPPost,
 
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct Tp5d {
+    fg: Vec<u8>,
+    bg: Vec<u8>
+}
+
+#[derive(Debug, Deserialize)]
+struct PostsQuery {
+    page: Option<u64>,
+    per_page: Option<u64>,
+}
+
+#[derive(Debug, Serialize, FromQueryResult)]
+struct PostListItem {
+    id: u32,
+    date: String,
+    title: String,
+    slug: String,
+    excerpt: String,
+    image: JsonField<Image>,
+    fg: String,
+    bg: String,
+    link: String,
+    continent: String,
+    categories: JsonField<BTreeMap<String, u32>>,
+    tags: JsonField<BTreeMap<String, u32>>,
+    coords: JsonField<Option<Vec<Record<String, (f32, f32)>>>>,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct PostIdRow {
+    id: u32,
+    date: String,
+    title: String,
+    image: JsonField<Image>,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct ImageRow {
+    image: JsonField<Image>,
 }
 
 #[derive(Clone)]
 struct AppState {
     db: Arc<DatabaseConnection>,
-    cities: Vec<entity::city::Model>,
-    coords: Vec<Coord>,
-    post_coords: Vec<Record<String, (f32, f32)>>,
-    posts: Vec<Post>,
-    menu_items: Vec<MenuItem>,
+    last_update: DateTime<Utc>
 }
 
 fn distance(p1: &(f32, f32), p2: &(f32, f32)) -> f32 {
@@ -395,292 +462,41 @@ fn distance(p1: &(f32, f32), p2: &(f32, f32)) -> f32 {
     f32::sqrt(f32::powf(p2.0 - p1.0, 2f32) + f32::powf(p2.1 - p1.1, 2f32))
 }
 
-fn select_coord(
-    coords: &BTreeSet<Record<String, (f32, f32)>>,
-) -> Option<Record<String, (f32, f32)>> {
-    // println!("select_coord coords.len(): {}", coords.len());
-    let mut coords = coords.iter().collect::<Vec<&Record<String, (f32, f32)>>>();
-    let mut idx: usize = 0;
-    while coords.len() > 1 {
-        let summ = coords.iter().fold((0.0, 0.0), |accum, coord| {
-            (accum.0 + coord.value().0, accum.1 + coord.value().1)
-        });
-        let avg = (summ.0 / coords.len() as f32, summ.1 / coords.len() as f32);
-        let farthest =
-            coords
-                .iter()
-                .enumerate()
-                .fold((0, (avg.0, avg.1)), |accum, (idx, coord)| {
-                    let a = distance(&avg, &coord.value());
-                    let b = distance(&avg, &accum.1);
-                    // println!("idx: {idx} a: {a} b: {b}");
-                    if a >= b { (idx, *coord.value()) } else { accum }
-                });
 
-        coords.remove(farthest.0);
-    }
 
-    coords.into_iter().next().cloned()
-}
 
-fn cluster(
-    coords: &mut Vec<Record<String, (f32, f32)>>,
-    rand: &mut random::Xorshift128Plus,
-) -> (f32, f32) {
-    if coords.is_empty() {
-        return (0.0, 0.0);
-    }
-    if coords.len() == 1 {
-        return coords[0].value().clone();
-    }
-    // eprintln!("r: {}", rand.read::<f32>());
-    // let r2 = rand.read::<f32>() / f32::MAX * 180f32;
-    let mut iter: random::Sequence<'_, random::Default, f32> = rand.iter();
-    iter.next();
 
-    coords.sort_by_key(|rec| rec.value().0 as u32 + rec.value().1 as u32);
-    // println!("coords: {coords:?}");
-    // println!("coords.len(): {}", coords.len());
 
-    let mut centroid1 = coords[iter.next().unwrap_or(0.0) as usize * coords.len() / 2]
-        .value()
-        .clone();
-    // println!("coords.len(): {}", coords.len());
-    let mut centroid2 = coords
-        [coords.len() / 2 + iter.next().unwrap_or(0.0) as usize * coords.len() / 2]
-        .value()
-        .clone();
-
-    let mut cluster1 = Vec::<&(f32, f32)>::new();
-    let mut cluster2 = Vec::<&(f32, f32)>::new();
-
-    let mut c1_avg = (180f32, 360f32);
-    let mut c2_avg = (180f32, 360f32);
-
-    let mut c1_dist = f32::MAX;
-    let mut c2_dist = f32::MAX;
-
-    let mut changes = 1;
-
-    while changes > 0
-        && (distance(&centroid1, &c1_avg) > 5f32 || distance(&centroid2, &c2_avg) > 5f32)
-    {
-        changes = 0;
-
-        coords.iter().for_each(|coord| {
-            // println!("coord: {:?}", coord.value());
-            // println!("centroid1: {centroid1:?}");
-            // println!("centroid2: {centroid2:?}");
-
-            c1_dist = distance(&centroid1, &coord.value());
-            c2_dist = distance(&centroid2, &coord.value());
-
-            // println!("c1_dist: {c1_dist}\tc2_dist: {c2_dist}");
-
-            if c1_dist < c2_dist {
-                if !cluster1.contains(&&coord.value()) {
-                    if cluster2.contains(&&coord.value()) {
-                        cluster1.push(
-                            cluster2
-                                .extract_if(.., |c| *c == coord.value())
-                                .next()
-                                .unwrap(),
-                        );
-                        changes += 1;
-                    } else {
-                        cluster1.push(&coord.value());
-                    }
-                }
-            } else {
-                if !cluster2.contains(&&coord.value()) {
-                    if cluster1.contains(&&coord.value()) {
-                        cluster2.push(
-                            cluster1
-                                .extract_if(.., |c| *c == coord.value())
-                                .next()
-                                .unwrap(),
-                        );
-                        changes += 1;
-                    } else {
-                        cluster2.push(&coord.value());
-                    }
-                }
-            }
-
-            // println!("cluster1: {cluster1:?}");
-            // println!("cluster2: {cluster2:?}");
-
-            let c1_summ = cluster1
-                .iter()
-                .fold((0f32, 0f32), |accum, c| (accum.0 + c.0, accum.1 + c.1));
-
-            c1_avg = (
-                c1_summ.0 / f32::max(cluster1.len() as f32, 0.1e-10),
-                c1_summ.1 / f32::max(cluster1.len() as f32, 0.1e-10),
-            );
-
-            let c2_summ = cluster2
-                .iter()
-                .fold((0f32, 0f32), |accum, c| (accum.0 + c.0, accum.1 + c.1));
-            c2_avg = (
-                c2_summ.0 / f32::max(cluster2.len() as f32, 0.1e-10),
-                c2_summ.1 / f32::max(cluster2.len() as f32, 0.1e-10),
-            );
-
-            // println!("c1_avg: {c1_avg:?}\tc2_avg: {c2_avg:?}");
-
-            let dy1 = c1_avg.0 - centroid1.0;
-            let dx1 = c1_avg.1 - centroid1.1;
-            let dy2 = c2_avg.0 - centroid2.0;
-            let dx2 = c2_avg.1 - centroid2.1;
-
-            let m1 = dy1 / f32::max(dx1, 0.1e-10);
-            let m2 = dy2 / f32::max(dx2, 0.1e-10);
-
-            let rate1 = c1_dist / 2.0 * if dy1 < 0f32 { -1f32 } else { 1f32 };
-            let rate2 = c2_dist / 2.0 * if dy2 < 0f32 { -1f32 } else { 1f32 };
-
-            centroid1.0 += m1 * rate1;
-            centroid1.1 += rate1;
-            centroid2.0 += m2 * rate2;
-            centroid2.1 += rate2;
-        });
-    }
-    if cluster1.len() > cluster2.len() {
-        centroid1
-    } else {
-        centroid2
-    }
-}
-
-async fn extract_exif_from_url(
-    url: String,
-    client: &reqwest::Client,
-) -> Result<Option<EXIF>, Box<dyn Error>> {
-    let ext_re = pcre2::bytes::Regex::new(r#"(?:https?://.+/.+\.)(?<ext>.+?)$"#);
-    let match_ = ext_re?.captures(url.as_bytes())?.expect("img extension");
-
-    let ext = str::from_utf8(&match_["ext"])?;
-    // println!("url: {url}");
-    // println!("ext: {ext}");
-
-    let fe = match ext {
-        "jpg" | "jpeg" => FileExtension::JPEG,
-        "png" => FileExtension::PNG {
-            as_zTXt_chunk: false,
-        },
-        "webp" => FileExtension::WEBP,
-        _ => FileExtension::JPEG,
-    };
-
-    let ext = match ext {
-        "jpg" | "jpeg" => "jpeg",
-        other => other,
-    };
-
-    let mut mime = format!("image/{ext}").as_str();
-    let mut lon: Option<f32> = None;
-    let mut lat: Option<f32> = None;
-
-    let res = client.get(url).send().await?;
-
-    // println!("\n{res:?}");
-    let mime_header = res.headers().get("content-type").cloned();
-    if let Some(hv) = &mime_header {
-        mime = hv.to_str()?;
-    }
-    let bytes = res.bytes().await?;
-    // println!("bytes: {bytes:?}");
-
-    let buf = bytes.into_iter().collect::<Vec<u8>>();
-    // println!("buf: {buf:?}");
-    let mut width = 1480;
-    let mut height = 740;
-
-    if let Ok(metadata) = Metadata::new_from_vec(&buf, fe) {
-        // println!("metadata: {metadata:?}");
-
-        if let Some(ExifTag::GPSLongitude(lon_)) = &mut metadata
-            .get_tag(&ExifTag::GPSLongitude(RATIONAL64U::new()))
-            .next()
-        {
-            if let Some(ExifTag::GPSLongitudeRef(lon_ref)) = metadata
-                .get_tag(&ExifTag::GPSLongitudeRef("".to_string()))
-                .next()
-            {
-                // println!("lon_ref: {lon_ref}");
-                let m = if *lon_ref == "E".to_string() {
-                    1f32
-                } else {
-                    -1f32
-                };
-                // println!("lon: {lon_:?}");
-                lon = Some(lon_[0].nominator as f32 * m);
-            }
-        }
-
-        if let Some(ExifTag::GPSLatitude(lat_)) = &mut metadata
-            .get_tag(&ExifTag::GPSLatitude(RATIONAL64U::new()))
-            .next()
-        {
-            if let Some(ExifTag::GPSLatitudeRef(lat_ref)) = metadata
-                .get_tag(&ExifTag::GPSLatitudeRef("".to_string()))
-                .next()
-            {
-                // println!("lat_ref: {lat_ref}");
-                let m = if *lat_ref == "N".to_string() {
-                    1f32
-                } else {
-                    -1f32
-                };
-                // println!("lat: {lat_:?}");
-                lat = Some(lat_[0].nominator as f32 * m);
-            }
-        }
-
-        if let Some(ExifTag::ImageWidth(w)) =
-            metadata.get_tag(&ExifTag::ImageWidth(INT32U::new())).next()
-        {
-            width = w[0];
-        }
-        if let Some(ExifTag::ImageHeight(h)) = metadata
-            .get_tag(&ExifTag::ImageHeight(INT32U::new()))
-            .next()
-        {
-            height = h[0];
-        }
-    }
-    if let Some(lt) = lat
-        && let Some(ln) = lon
-    {
-        Ok(Some(EXIF {
-            coord: (lt, ln),
-            width,
-            height,
-        }))
-    } else {
-        Ok(None)
-    }
-}
-
-async fn fetch_img_meta(id: u32, client: &reqwest::Client) -> Result<Media, reqwest::Error> {
-    let res = client
-        .get(format!(
-            "https://ozimage.com.au/wp-json/wp/v2/media/{id}?_fields=alt_text,mime_type,source_url"
-        ))
-        .send()
-        .await?;
-
-    res.json::<Media>().await
+async fn fetch_img_meta(id: u64, client: &reqwest::Client, username: String, password: String) -> Result<Media, reqwest::Error> {
+    let url = format!("https://ozimage.com.au/wp-json/wp/v2/media/{id}?_fields=alt_text,mime_type,source_url");
+    let b64 = format!("{username}:{password}")
+        .as_bytes()
+        .to_base64(STANDARD);
+    println!("fetch_img_meta: {url}");
+    let mut res = client
+        .get(url.as_str())
+        .header("User-Agent", "curl/8.0.0")
+        .header("Authorization", format!("Basic {b64}"))
+        .send().await?;
+        // println!("{:?}", &mut res.text().await?);
+        let json =res.json::<Media>().await?;
+    info!("json: {:?}", json);
+    Ok(json)
 }
 
 async fn fetch_img(
-    id: u32,
+    id: u64,
     client: &reqwest::Client,
+    username: String,
+    password: String
 ) -> Result<Option<(Bytes, Option<String>)>, reqwest::Error> {
-    let media = fetch_img_meta(id, &client).await?;
+    println!("fetch_img");
+    let media = fetch_img_meta(id, &client, username, password).await?;
+    // println!("media: {:?}", media.clone());
     if let Some(url) = media.source_url {
+        println!("url: {:?}", url.clone());
         let res = client.get(url).send().await?;
+        // println!("res: {res:?}");
         Ok(Some((res.bytes().await?, media.mime_type)))
     } else {
         Ok(None)
@@ -689,47 +505,79 @@ async fn fetch_img(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    #[cfg(debug_assertions)]
     from_filename(".env.local").ok();
-    let db = Database::connect("sqlite://db/db.sqlite?mode=rwc").await?;
-    let schema_manager = SchemaManager::new(&db);
+    
+    let wp_server = std::env::var("WP_SERVER")?;
 
+    println!("TP5D_SERVER: {:?}", std::env::var("TP5D_SERVER")?);
+
+    println!("initialising tracing_subscriber");
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_ansi(false) // Disable colors for cleaner Fly.io logs
+        .init();
+    
+    // let subscriber = tracing_subscriber::fmt().log_internal_errors(true).with_line_number(true).finish();
+    
+    let username = std::env::var("USERNAME")?;
+    let password = std::env::var("PASSWORD")?;
+    let b64 = format!("{username}:{password}")
+        .as_bytes()
+        .to_base64(STANDARD);
+    let opt = ConnectOptions::new("sqlite://db/db.sqlite?mode=rwc")
+        .min_connections(1)
+        .max_connections(5)
+        .connect_timeout(Duration::from_secs(8))
+        .idle_timeout(Duration::from_secs(8))
+        .acquire_timeout(Duration::from_secs(8))
+        .sqlx_logging(true)
+        .to_owned();
+    log::info!("connecting to db");
+    let db = Database::connect(opt).await.map_err(|e| {
+        // eprintln!("{e:?}");
+        log::error!("DbErr: {e:?}");
+        log::debug!("{e:?}");
+        // error!("{e:?}");
+        e
+    })?;
     db.get_schema_registry("places-ai::entity::*")
         .sync(&db)
         .await?;
 
     let state = Arc::<AppState>::new(AppState {
         db: Arc::new(db.clone()),
-        cities: Vec::new(),
-        coords: Vec::new(),
-        post_coords: Vec::new(),
-        posts: Vec::new(),
-        menu_items: Vec::new(),
+        last_update: Utc::now()
     });
 
-    print!("Initializing server...");
+    info!("Initializing server...");
 
     let cors = CorsLayer::new()
-        .allow_methods([http::Method::GET])
+        .allow_methods([http::Method::GET, http::Method::POST])
         .allow_origin(Any);
 
-    tracing_subscriber::fmt::init();
-
     let app = Router::<Arc<AppState>>::new()
+        .layer(DefaultBodyLimit::max(8_388_608))
         .route("/menu/items", get(get_menu_items))
         .route("/posts", get(get_posts))
         .route("/posts/ids", get(get_post_ids))
         .route("/post/data/{id}", get(get_post_data))
         .route("/post/{slug}", get(get_post))
-        .route("/posts/coords", get(get_coords))
+        .route("/coords", get(get_coords))
         .route("/image/{id}", get(get_image))
         .route("/posts/featured", get(get_featured_posts))
         .route("/images", get(get_feature_images))
+        .route("/tp5d/{id}", get(get_tp5d))
+        .route("/last_update", get(last_update))
         .route("/ping", get(ping))
         .with_state(state)
         .route_layer(cors);
+        // .layer(TraceLayer::new_for_http());
+       
+        
 
     let listener = TcpListener::bind("0.0.0.0:8080").await?;
-    tracing::debug!("listening on {}", listener.local_addr().unwrap());
+    info!("listening on {}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
         if let Err(err) = serve(listener, app).await {
             eprintln!("server error: {err}");
@@ -737,74 +585,72 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
 
     let client = reqwest::Client::new();
-    let username = std::env::var("USERNAME")?;
-    let password = std::env::var("PASSWORD")?;
-    let b64 = format!("{username}:{password}")
-        .as_bytes()
-        .to_base64(STANDARD);
-
+    
     if MenuItems::find().one(&db).await?.is_none() {
-        let menu_items: Vec<MenuItem> = {
+        info!("fetching main-menu id...");
+        let menu_id: u32 = client
+            .get(format!("{wp_server}/menus?_fields=id,slug&search=main-menu&search-columns=slug"))
+            .header("Authorization", format!("Basic {b64}"))
+            .send()
+            .await?
+            .json::<Vec<Menu>>()
+            .await?
+            .get(0)
+            .map(|menu| menu.id)
+            .unwrap_or_default();
+        info!("menu_id: {}", menu_id);
+        info!("fetching menu items...");
+        let menu_items: Vec<WPMenuItem> = {
             let res = client
-        .get(format!("https://ozimage.com.au/wp-json/wp/v2/menu-items?_fields=id,title,parent,menu_order,url"))
+        .get(format!("https://ozimage.com.au/wp-json/wp/v2/menu-items?_fields=id,title,parent,menus,menu_order,url"))
         .header("Authorization", format!("Basic {b64}"))
         .send()
         .await?;
-            println!("res: {res:?}");
+            // println!("res: {res:?}");
 
             let menu_items = res.json().await?;
-            println!("menu_items: {menu_items:?}");
+            // println!("menu_items: {menu_items:?}");
 
             menu_items
         };
         for item in menu_items {
-            println!("item: {:?}", item);
+            // println!("item: {:?}", item);
+            if item.menus == menu_id {
             MenuItems::insert(menu_item::ActiveModel {
                 id: Set(item.id),
-                title: Set(item.title),
+                title: Set(JsonField::<menu_item::Html>(item.title)),
                 parent: Set(item.parent),
                 menu_order: Set(item.menu_order),
                 url: Set(item.url),
             }).exec(&db).await?;
         }
+        }
     }
 
-    let menu_items = MenuItems::find().all(&db).await?;
-
-    // println!("menu_items: {menu_items:#?}");
-
-    // let mut cities = BTreeMap::<String, City>::new();
-    let mut cities = Vec::<City>::new();
-    let mut coords = Vec::<Coord>::new();
-
-    if Cities::find().one(&db).await?.is_none() {
-        (cities, coords) = parse_csv(db.clone()).await?;
-    } else {
-        let res = Cities::find();
-        println!("{}", res.build(DbBackend::Sqlite).to_string());
-        cities = res.all(&db).await?;
-    }
-
-    let mut post_coords = Vec::<Record<String, (f32, f32)>>::new();
-    let mut posts = Vec::<Post>::new();
     if Posts::find().one(&db).await?.is_none() {
-        print!("Fetching post data...");
+        info!("Fetching post data...");
+        let cities = if Cities::find().one(&db).await?.is_none() {
+            parse_csv(db.clone()).await?
+        } else {
+            Cities::find().all(&db).await?
+        };
 
         let wp_posts =
-    client.get("https://ozimage.com.au/wp-json/wp/v2/posts?_fields=date,author,id,title,slug,excerpt,content,featured_media,link,categories,tags&per_page=100").send().await?.json::<Vec<WPPost>>().await?;
+    client.get(format!("{wp_server}/posts?_fields=date,author,id,title,slug,excerpt,content,featured_media,link,categories,tags,meta&per_page=100").as_str()).send().await?.json::<Vec<WPPost>>().await?;
         println!("done");
         // println!("{posts:?}");
         print!("Fetching categories...");
         let categories = client
-            .get("https://ozimage.com.au/wp-json/wp/v2/categories?_fields=id,name&per_page=100")
+            .get(format!("{wp_server}/categories?_fields=id,name&per_page=100"))
             .send()
             .await?
             .json::<Vec<Label>>()
             .await?;
+
         println!("done");
         print!("Fetching tags...");
         let tags = client
-            .get("https://ozimage.com.au/wp-json/wp/v2/tags?_fields=id,name")
+            .get(format!("{wp_server}/tags?_fields=id,name"))
             .send()
             .await?
             .json::<Vec<Label>>()
@@ -812,7 +658,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("done");
 
         println!("Caching post data...");
-        let mut post_data = Vec::<PostData>::new();
         // let re = Regex::new(r"(\p{Lu}\p{Ll}+)(\s\p{Lu}\p{Ll}*)*")?;
         let re = Regex::new(r"\b(\p{Lu}\p{Ll}{2,})(\s\p{Lu}\p{Ll}*)*")?;
 
@@ -821,26 +666,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let img_re = Regex::new(
             r#"<img.*?(width="(?<width>\d+?)".*?height="(?<height>\d+?)".*?)?(?:data-)?src="(?<url>http.+/(?<filename>.+\.(?<ext>png|jpg|jpeg)))".*?alt="(?<alt>.*?)?".*?/?>"#,
         )?;
-        let mut default_city_name = String::new();
-        let mut city_names = Vec::<String>::new();
-        // println!("{:?}", posts[0].content.rendered.as_bytes());
         for post in &wp_posts {
-            let WPPost {
-                id,
-                title,
-                date,
-                slug,
-                author,
-                excerpt,
-                content,
-                featured_media,
-                link,
-                categories: cat_list,
-                tags: tag_list,
-                ..
-            } = post.clone();
-
-            let title = title.rendered;
+            let id = post.id;
+            let title = post.title.rendered.clone();
+            let date = post.date.clone();
+            let slug = post.slug.clone();
+            let author = post.author;
+            let excerpt = post.excerpt.rendered.clone();
+            let content_rendered = post.content.rendered.clone();
+            let featured_media = post.featured_media;
+            let link = post.link.clone();
+            let cat_list = &post.categories;
+            let tag_list = &post.tags;
+            let meta = &post.meta;
             // println!("title: {title}");
 
             // print!("\t ...extracting main image...");
@@ -848,146 +686,111 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let mut width: u32 = 1480;
             let mut height: u32 = 740;
             let mut alt = "".to_string();
-            let mut place_name = "".to_string();
-            let mut img_coords: Option<Record<String, (f32, f32)>> = None;
+            let img_coords: Option<Record<String, (f32, f32)>> = None;
 
             let mut image: Option<Image> = None;
 
-            let excerpt = excerpt.rendered;
             let cat_data = BTreeMap::<String, u32>::from_iter(
                 categories
                     .iter()
-                    .map(|cat| (cat.name.clone(), cat.id.clone()))
-                    .filter(|(_, v)| cat_list.contains(v)),
+                    .map(|cat| (cat.name.clone(), cat.id.clone() as u32))
+                    .filter(|(_, v)| cat_list.contains(&(*v as u64))),
             );
+
+            let continent = if let Value::Object(map) = meta {
+                let name = if let Value::Number(cat) = &map["wds_primary_category"] {
+                    if let Some((name, _)) = cat_data.iter().find(|(_, id)| cat.as_u64() == Some((**id).into())) {
+                        name.clone()
+                    } else if let Some((name, _)) = cat_data.iter().find(|(_, id)| cat_list[0] == **id as u64) {
+                        name.clone()
+                    } else {
+                        "".to_string()
+                    }
+
+                } else if let Some((name, _)) = cat_data.iter().find(|(_, id)| cat_list[0] == **id as u64) {
+                        name.clone()
+                } else { 
+                    "".to_string()
+                };
+                name
+            } else { 
+                "".to_string() 
+            };
+
+            // println!("continent: {continent:?}");
+                
             let tag_data = BTreeMap::<String, u32>::from_iter(
                 tags.iter()
-                    .map(|tag| (tag.name.clone(), tag.id.clone()))
-                    .filter(|(_, v)| tag_list.contains(v)),
+                    .map(|tag| (tag.name.clone(), tag.id.clone() as u32))
+                    .filter(|(_, v)| tag_list.contains(&(*v as u64))),
             );
 
             let mut coord_set = BTreeSet::<Record<String, (f32, f32)>>::new();
             let mut coords = Vec::<Record<String, (f32, f32)>>::new();
 
-            let mut countries = BTreeSet::<String>::new();
-            let mut admin_names = BTreeSet::<String>::new();
-            let mut capitals = BTreeSet::<String>::new();
+            let mut scan_text = |text: &str| -> Result<(), Box<dyn Error>> {
+                for result in re.find_iter(text.as_bytes()) {
+                    let match_ = result?;
+                    let match_str = match str::from_utf8(match_.as_bytes()) {
+                        Ok(value) => value,
+                        Err(_) => continue,
+                    };
+                    if let Some(city) = cities.iter().find(|c| {
+                        match_str == c.admin_name || match_str == c.country || match_str == c.name
+                    }) {
+                        let coord = Record::new(match_str.to_string(), (city.lat, city.lng));
+                        coord_set.insert(coord);
+                    }
+                }
+                Ok(())
+            };
 
-            let search_subject = cat_data
+            let category_text = cat_data
                 .keys()
                 .cloned()
                 .collect::<Vec<String>>()
-                .join(" ")
-                .chars()
-                .chain(post.title.rendered.chars())
-                .chain(post.excerpt.rendered.chars())
-                .chain(post.content.rendered.chars())
-                .collect::<String>();
+                .join(" ");
+            scan_text(&category_text)?;
+            scan_text(&title)?;
+            scan_text(&excerpt)?;
+            scan_text(&content_rendered)?;
 
-            // println!("search_subject: {search_subject}");
-
-            let mut counter = 0;
-            for result in re.find_iter(search_subject.as_bytes()) {
-                counter += 1;
-                let match_ = result?;
-                let match_string = String::from_utf8(match_.as_bytes().to_vec())
-                    .unwrap_or("Failed to match".to_string());
-                // eprintln!("match_string: {match_string:?}");
-                // for i in 0..(caps.len()) {
-                //     // println!("i: {i}\t\tcaps.len(): {}", caps.len());
-                //     if let Ok(match_) = str::from_utf8(&caps[i])
-
-                //     {
-                //         println!("match_: {match_}");
-                if let Some(city) = cities.iter().find(|c| {
-                    // println!("n: {n}");
-                    match &match_string {
-                        admin if *match_string == c.admin_name => {
-                            // println!("admin_name: {admin}");
-                            admin_names.insert(admin.clone());
-                            true
-                        }
-                        country if *match_string == c.country => {
-                            // println!("country: {country}");
-                            countries.insert(country.clone());
-                            true
-                        }
-                        name if *match_string == c.name => {
-                            // println!("city_name: {name}");
-                            city_names.push(name.clone());
-                            true
-                        }
-                        other => {
-                            // println!("other: {other}");
-                            false
-                        }
-                    }
-                }) {
-                    // println!("name: {name}");
-                    let coord = Record::new(match_string, (city.lat, city.lng));
-                    coord_set.insert(coord.clone());
-                    post_coords.push(coord);
-                    place_name = city.name.clone();
-                    // println!("place_name: {place_name}");
-                }
-                // }
-                // }
-            }
-            // println!("counter: {counter}");
-            let mut captures_iter = img_re.captures_iter(content.rendered.as_bytes());
+            let mut captures_iter = img_re.captures_iter(content_rendered.as_bytes());
             // println!("captures_iter.count(): {}", &&captures_iter.count());
             while let Some(Ok(cap)) = captures_iter.next() {
                 // println!("\ncaptures: {:?}", &captures);
-                let url = str::from_utf8(&cap["url"])?;
-                // println!("url: {url}");
+                let url = match str::from_utf8(&cap["url"]) {
+                    Ok(value) => value,
+                    Err(_) => continue,
+                };
+                
                 if let Some(a) = cap.name("alt") {
-                    alt = str::from_utf8(&a.as_bytes())?.to_string();
+                    alt = String::from_utf8_lossy(a.as_bytes()).to_string();
                 }
                 if let Some(w) = cap.name("width") {
-                    if let Ok(n) = u32::from_str_radix(str::from_utf8(&w.as_bytes())?, 10) {
+                    if let Ok(value) = str::from_utf8(w.as_bytes()) {
+                        if let Ok(n) = u32::from_str_radix(value, 10) {
                         width = n;
+                        }
                     }
                 }
                 if let Some(h) = cap.name("height") {
-                    if let Ok(n) = u32::from_str_radix(str::from_utf8(&h.as_bytes())?, 10) {
+                    if let Ok(value) = str::from_utf8(h.as_bytes()) {
+                        if let Ok(n) = u32::from_str_radix(value, 10) {
                         height = n;
+                        }
                     }
                 }
 
-                // println!("city_names.len(): {}", city_names.len());
-
-                default_city_name = city_names.iter().fold("".to_string(), |n1, n2| {
-                    if city_names.iter().filter(|n| **n == *n2).count()
-                        > city_names.iter().filter(|n| **n == n1).count()
-                    {
-                        n2.clone()
-                    } else {
-                        n1
-                    }
-                });
-
-                if !default_city_name.is_empty() {
-                    // println!("default_city_name: {default_city_name}");
-                }
-
-                if let Some(exif) = extract_exif_from_url(url.to_string(), &client).await? {
-                    coord_set.insert(Record::<String, (f32, f32)>::new(
-                        default_city_name.clone(),
-                        exif.coord,
-                    ));
-                }
             }
             println!("fetching featured_media {featured_media}");
-            // let res =  client.get(format!(
-            //     "https://ozimage.com.au/wp-json/wp/v2/media/{featured_media}?_fields=alt_text,mime_type,source_url"
-            // )).send().await?;
 
-            // let media = res.json::<Media>().await?;
+            let mut fg = Vec::<u8>::new();
+            let mut bg = Vec::<u8>::new();
 
-            // let res = client.get(media.source_url).send().await?;
-
-            if let Some((img_bytes, Some(mime_type))) = fetch_img(featured_media, &client).await? {
-                print!("\t...converting to base64...");
+            if let Some((img_bytes, Some(mime_type))) = fetch_img(featured_media, &client, username.clone(), password.clone()).await? {
+                
+                info!("...converting to base64...");
                 b64.push_str(format!("data:{};base64,", mime_type).as_str());
 
                 b64.push_str(&img_bytes.to_base64(STANDARD));
@@ -995,47 +798,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     println!("data for image with alt {alt:?} missing");
                 }
                 println!("done");
-            }
-            let meta = fetch_img_meta(featured_media, &client).await?;
-            // println!("meta: {meta:?}");
-            if let Some(url) = meta.source_url {
-                if let Some(exif) = extract_exif_from_url(url, &client).await? {
-                    width = exif.width;
-                    height = exif.height;
-                    let rec =
-                        Record::<String, (f32, f32)>::new(default_city_name.clone(), exif.coord);
-                    default_city_name.clear();
-                    img_coords = Some(rec.clone());
-                    coord_set.insert(rec);
-                }
-            }
 
-            // if !(lt.is_nan() || lt.is_infinite() || ln.is_nan() || ln.is_infinite()) {
-            //     let img_record =
-            //         Record::<String, (f32, f32)>::new(name, (lt, ln));
-            //     img_coords = Some(img_record.clone());
-            //     coord_set.insert(img_record);
-            // }
-
-            // println!("coord_set.len(): {}", coord_set.len());
-            //
-            let pin_coord = select_coord(
-                &mut coord_set, // .into_iter()
-                                // .collect::<Vec<Record<String, (f32, f32)>>>(),
-                                // &mut rand,
-            );
-            // println!("pin_coord: {pin_coord:?}");
-            if let Some(coord) = pin_coord {
-                coords.clear();
-                coords.push(coord);
             }
-            // coords = std::mem::take(&mut coord_set.into_iter().collect::<Vec<Record<String, (f32, f32)>>>());
-            // if let Some(coord) = pin_coord {
-            // coords.insert(0, Record::<String, (f32, f32)>::new(place_name, coord));
-            // }
 
             image = Some(Image {
-                id: featured_media,
+                id: featured_media as u32,
                 b64,
                 width,
                 height,
@@ -1043,39 +810,33 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 coords: JsonField::<Option<Record<String, (f32, f32)>>>(img_coords),
             });
 
-            city_names.clear();
-
             let row = entity::post::ActiveModel {
-                id: Set(id),
+                id: Set(id as u32),
                 date: Set(date),
                 slug: Set(slug),
                 link: Set(link),
-                author: Set(author),
+                author: Set(author as u32),
                 title: Set(title),
-                content: Set(content.rendered),
+                content: Set(content_rendered),
                 image: Set(JsonField::<Image>(image.expect("empty string"))),
+                fg: Set("".to_string()),
+                bg: Set("".to_string()),
                 excerpt: Set(excerpt),
+                continent: Set(continent),
                 categories: Set(JsonField::<BTreeMap<String, u32>>(cat_data)),
                 tags: Set(JsonField::<BTreeMap<String, u32>>(tag_data)),
                 coords: Set(JsonField::<Option<Vec<Record<String, (f32, f32)>>>>(Some(
                     coords,
                 ))),
             };
-            let res = Posts::insert(row);
-            // println!("{}", res.build(DbBackend::Sqlite).to_string());
-            res.exec(&db).await.ok();
+
+            // Tp5ds::insert(tp5d::ActiveModel {id:Set(featured_media as i32), fg: Set(format!("data:image/webp;base64,{}", fg.to_base64(STANDARD))), bg: Set(format!("data:image/webp;base64,{}", bg.to_base64(STANDARD))) }).exec(&db).await?;
+            // let res = Posts::insert(row).exec(&db).await?;
+            // println!("res: {res:?}");
+            // // println!("{}", res.build(DbBackend::Sqlite).to_string());
+            // res.exec(&db).await.ok();
         }
 
-        let slug_map = Arc::new(BTreeMap::<String, Html>::from_iter(
-            wp_posts.iter().map(|d| (d.slug.clone(), d.content.clone())),
-        ));
-
-        let ids = post_data.iter().map(|d| d.id).collect::<Vec<u32>>();
-        post_data.sort_by(|d1, d2| d1.id.cmp(&d2.id));
-    } else {
-        let res = Posts::find();
-        println!("{}", res.build(DbBackend::Sqlite).to_string());
-        posts = res.all(&db).await?
     }
 
     println!("done");
@@ -1084,10 +845,33 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+// async fn handle_socket(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> axum::response::Response {
+//     ws.on_upgrade(move |socket| get_posts(socket, state))
+
+// }
+
 #[debug_handler]
-async fn get_posts(State(state): State<Arc<AppState>>) -> Json<Vec<Post>> {
-    let mut data = Posts::find()
-        // .select_only()
+async fn get_posts(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<PostsQuery>,
+) -> Json<Vec<PostListItem>> {
+    println!("GET /posts");
+
+    // while let Some(msg) = ws.recv().await {
+    //     if let Ok(msg) = msg {
+    //         let id = msg.into_text()
+    //     }
+    // }
+    let page = params.page.unwrap_or(1).max(1);
+    let per_page = params
+        .per_page
+        .unwrap_or(DEFAULT_POSTS_PER_PAGE)
+        .max(1)
+        .min(MAX_POSTS_PER_PAGE);
+    let offset = 7 + (page - 1) * per_page;
+
+    let data = Posts::find()
+        .select_only()
         .columns([
             post::Column::Id,
             post::Column::Date,
@@ -1095,52 +879,42 @@ async fn get_posts(State(state): State<Arc<AppState>>) -> Json<Vec<Post>> {
             post::Column::Slug,
             post::Column::Excerpt,
             post::Column::Image,
+            post::Column::Fg,
+            post::Column::Bg,
             post::Column::Link,
+            post::Column::Continent,
             post::Column::Categories,
             post::Column::Tags,
             post::Column::Coords,
         ])
+        .order_by_desc(post::Column::Date)
+        .offset(offset)
+        .limit(per_page)
+        .into_model::<PostListItem>()
         .all(&*state.db)
         .await
-        .ok()
         .unwrap_or_default();
-    // println!("data: {data:?}");
-    data.sort_by(|p1, p2| {
-        let d1 = chrono::NaiveDateTime::parse_from_str(p1.date.as_str(), "%Y-%m-%dT%H:%M:%S")
-            .ok()
-            .unwrap_or_default();
-        let d2 = chrono::NaiveDateTime::parse_from_str(p2.date.as_str(), "%Y-%m-%dT%H:%M:%S")
-            .ok()
-            .unwrap_or_default();
-        d2.cmp(&d1)
-    });
-    // println!("data: {data:?}");
-    let value = Json::<Vec<Post>>(data);
-    
-    value
+    Json(data)
 }
 
 #[debug_handler]
 async fn get_post_ids(State(state): State<Arc<AppState>>) -> Json<Vec<u32>> {
-    let mut ids = Posts::find()
-        // .select_only()
-        .column(post::Column::Id)
+    let ids = Posts::find()
+        .select_only()
+        .columns([
+            post::Column::Id,
+            post::Column::Date,
+            post::Column::Title,
+            post::Column::Image,
+        ])
+        .order_by_desc(post::Column::Date)
+        .offset(7)
+        .into_model::<PostIdRow>()
         .all(&*state.db)
         .await
-        // .ok()
         .unwrap_or_default();
-    ids.sort_by(|p1, p2| {
-        let d1 = chrono::NaiveDateTime::parse_from_str(p1.date.as_str(), "%Y-%m-%dT%H:%M:%S")
-            .ok()
-            .unwrap_or_default();
-        let d2 = chrono::NaiveDateTime::parse_from_str(p2.date.as_str(), "%Y-%m-%dT%H:%M:%S")
-            .ok()
-            .unwrap_or_default();
-        d2.cmp(&d1)
-    });
     Json(
-        ids.iter()
-            .skip(7)
+        ids.into_iter()
             .filter(|post| {
                 if post.image.0.b64.as_str() != "" {
                     true
@@ -1149,7 +923,7 @@ async fn get_post_ids(State(state): State<Arc<AppState>>) -> Json<Vec<u32>> {
                     false
                 }
             })
-            .map(|post| post.id)
+            .map(|post| post.id as u32)
             .collect::<Vec<u32>>(),
     )
 }
@@ -1178,8 +952,8 @@ async fn get_post(State(state): State<Arc<AppState>>, Path(slug): Path<String>) 
 }
 
 #[debug_handler]
-async fn get_post_data(State(state): State<Arc<AppState>>, Path(id): Path<u32>) -> Json<Post> {
-    let res = Posts::find_by_id(id)
+async fn get_post_data(State(state): State<Arc<AppState>>, Path(id): Path<u64>) -> Json<Post> {
+    let res = Posts::find_by_id(id as u32)
         // .select_only()
         .columns([
             post::Column::Id,
@@ -1189,6 +963,7 @@ async fn get_post_data(State(state): State<Arc<AppState>>, Path(id): Path<u32>) 
             post::Column::Excerpt,
             post::Column::Image,
             post::Column::Link,
+            post::Column::Continent,
             post::Column::Categories,
             post::Column::Tags,
             post::Column::Coords,
@@ -1227,61 +1002,71 @@ async fn get_coords(State(state): State<Arc<AppState>>) -> Json<Vec<Record<Strin
 #[debug_handler]
 async fn get_feature_images(State(state): State<Arc<AppState>>) -> Json<Vec<Image>> {
     println!("get_featured_images");
-    let res = Posts::find()
-        .order_by_desc(entity::post::Column::Date)
-        .column(entity::post::Column::Image);
-    println!("{}", res.build(DbBackend::Sqlite).to_string());
-    let res = res.all(&*state.db).await.ok();
-    if let Some(images) = res {
-        // println!("images: {images:?}");
-        Json(
-            images
-                .iter()
-                .take(7)
-                .map(|img| img.image.0.clone())
-                .collect::<Vec<Image>>(),
-        )
-    } else {
-        Json(Vec::<Image>::new())
-    }
-}
-
-#[debug_handler]
-async fn get_featured_posts(State(state): State<Arc<AppState>>) -> Json<Vec<Post>> {
-    println!("get_featured_posts");
-    let res = Posts::find().order_by_desc(entity::post::Column::Date);
-    let res = res.all(&*state.db).await.ok();
-    if let Some(mut posts) = res.to_owned() {
-        println!("posts[0].date: {:?}", posts[0].date);
-        posts.sort_by(|p1, p2| {
-            // println!("p1.date: {}", p1.date.as_str());
-            // YYYY-MM-DDTHH:MM:SS
-            let d1 = chrono::NaiveDateTime::parse_from_str(p1.date.as_str(), "%Y-%m-%dT%H:%M:%S")
-                .ok()
-                .unwrap_or_default();
-            let d2 = chrono::NaiveDateTime::parse_from_str(p2.date.as_str(), "%Y-%m-%dT%H:%M:%S")
-                .ok()
-                .unwrap_or_default();
-            d2.cmp(&d1)
-        });
-
-        Json(posts.into_iter().take(7).collect::<Vec<Post>>())
-    } else {
-        Json(Vec::<Post>::new())
-    }
-}
-
-#[debug_handler]
-async fn get_image(State(state): State<Arc<AppState>>, Path(id): Path<u32>) -> Json<Image> {
-    let res = Posts::find()
+    let images = Posts::find()
+        .select_only()
         .column(post::Column::Image)
+        .order_by_desc(post::Column::Date)
+        .limit(7)
+        .into_model::<ImageRow>()
+        .all(&*state.db)
+        .await
+        .unwrap_or_default();
+    Json(images.into_iter().map(|row| row.image.0).collect())
+}
+
+#[debug_handler]
+async fn get_featured_posts(State(state): State<Arc<AppState>>) -> Json<Vec<PostListItem>> {
+    println!("get_featured_posts");
+    let posts = Posts::find()
+        .select_only()
+        .columns([
+            post::Column::Id,
+            post::Column::Date,
+            post::Column::Title,
+            post::Column::Slug,
+            post::Column::Excerpt,
+            post::Column::Image,
+            post::Column::Fg,
+            post::Column::Bg,
+            post::Column::Link,
+            post::Column::Continent,
+            post::Column::Categories,
+            post::Column::Tags,
+            post::Column::Coords,
+        ])
+        .order_by_desc(post::Column::Date)
+        .limit(7)
+        .into_model::<PostListItem>()
+        .all(&*state.db)
+        .await
+        .unwrap_or_default();
+    Json(posts)
+}
+
+#[debug_handler]
+async fn get_image(State(state): State<Arc<AppState>>, Path(id): Path<u64>) -> Json<Image> {
+    let direct = Posts::find_by_id(id as u32)
+        .select_only()
+        .column(post::Column::Image)
+        .into_model::<ImageRow>()
+        .one(&*state.db)
+        .await
+        .ok()
+        .flatten();
+    if let Some(image) = direct {
+        return Json(image.image.0);
+    }
+
+    let res = Posts::find()
+        .select_only()
+        .column(post::Column::Image)
+        .into_model::<ImageRow>()
         .all(&*state.db)
         .await
         .ok();
-
     if let Some(images) = res {
-        if let Some(img) = images.into_iter().find(|i| i.id == id) {
-            Json(img.image.clone().0)
+        if let Some(img) = images.into_iter().find(|i| i.image.0.id == id as u32) {
+            Json(img.image.0)
         } else {
             Json(Image::default())
         }
@@ -1290,11 +1075,27 @@ async fn get_image(State(state): State<Arc<AppState>>, Path(id): Path<u32>) -> J
     }
 }
 
+
+
+
 #[debug_handler]
 async fn get_menu_items(State(state): State<Arc<AppState>>) -> Json<Vec<MenuItem>> {
-    let menu_items = MenuItems::find().order_by_asc(menu_item::Column::MenuOrder).all(&*state.db).await.unwrap_or_default();
-    println!("menu_items: {menu_items:?}");
-    Json(MenuItems::find().order_by_asc(menu_item::Column::MenuOrder).all(&*state.db).await.unwrap_or_default())
+    let menu_items = MenuItems::find()
+        .order_by_asc(menu_item::Column::MenuOrder)
+        .all(&*state.db)
+        .await
+        .unwrap_or_default();
+    Json(menu_items)
+}
+
+
+
+
+#[debug_handler]
+async fn get_tp5d(State(state): State<Arc<AppState>>, Path(id): Path<u64>) -> Json<TP5D> {
+    
+    let res = Tp5ds::find_by_id(id as i32).one(&*state.db).await.unwrap_or_default().unwrap_or_default();
+    Json(res)
 }
 
 async fn ping() -> String {
@@ -1305,3 +1106,8 @@ async fn ping() -> String {
 // async fn post_update_post() {
     
 // }
+
+#[debug_handler]
+async fn last_update(state: State<Arc<AppState>>) -> Json<DateTime<Utc>> {
+    Json(state.last_update)
+}

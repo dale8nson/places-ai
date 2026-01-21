@@ -18,8 +18,11 @@ FROM debian:bookworm-slim AS runtime
 WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libssl3 ca-certificates libsqlite3-0 \
-    && rm -rf /var/lib/apt/lists/*
-RUN mkdir db
+    && apt-get install -y sqlite3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p db && chown -R 1000:1000 db
+COPY --from=builder /app/db/db.sqlite /app/db/db.sqlite
 COPY --from=builder /app/data /app/data
 COPY --from=builder /app/target/release/places-ai /usr/local/bin
+
 ENTRYPOINT ["/usr/local/bin/places-ai"]

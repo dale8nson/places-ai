@@ -9,7 +9,10 @@ primary_region = 'syd'
 [build]
 
 [env]
-  PORT = '8080'
+  # PORT = '8080'
+  TP5D_SERVER="https://tp5d.fly.dev"
+  WP_SERVER="https://ozimage.com.au/wp-json/wp/v2"
+  # RUST_LOG='debug'
 
 [http_service]
   internal_port = 8080
