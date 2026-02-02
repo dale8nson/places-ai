@@ -127,7 +127,7 @@ pub mod post {
     use super::image::Image;
     use super::record::Record;
     use sea_orm::{JsonField, entity::prelude::*};
-    use serde::Serialize;
+    use serde::{Deserialize, Serialize};
 
     // impl PartialEq for Image {
     //   fn cmp(&self, other: &Self) -> Ordering {
@@ -136,7 +136,7 @@ pub mod post {
     // }
 
     #[sea_orm::model]
-    #[derive(Clone, Debug, DeriveEntityModel, Serialize)]
+    #[derive(Clone, Debug, DeriveEntityModel, Serialize, Deserialize)]
     #[sea_orm(table_name = "posts")]
     pub struct Model {
         #[sea_orm(primary_key)]

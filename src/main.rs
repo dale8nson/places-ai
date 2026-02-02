@@ -28,7 +28,7 @@ use entity::{
 };
 use serde_json::Value;
 
-use std::{ cmp::{Ordering, PartialOrd}, collections::{BTreeMap, BTreeSet}, error::Error, io::Read, sync::Arc, time::Duration
+use std::{ cmp::{Ordering, PartialOrd}, collections::{BTreeMap, BTreeSet}, error::Error, io::Read, ops::{Deref, DerefMut }, sync::{Arc, Mutex}, time::Duration
 };
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
@@ -444,18 +444,20 @@ struct ImageRow {
 #[derive(Clone)]
 struct AppState {
     db: Arc<DatabaseConnection>,
-    last_update: DateTime<Utc>
+    last_update: Arc<Mutex<DateTime<Utc>>>
 }
+
+// impl<T> Deref for AppState {
+//     type Target = T;
+//     fn deref(&self) -> &Self::Target {
+        
+//     }
+// }
 
 fn distance(p1: &(f32, f32), p2: &(f32, f32)) -> f32 {
     // println!("p1: {p1:?}\t\tp2: {p2:?}");
     f32::sqrt(f32::powf(p2.0 - p1.0, 2f32) + f32::powf(p2.1 - p1.1, 2f32))
 }
-
-
-
-
-
 
 async fn fetch_img_meta(id: u64, client: &reqwest::Client, username: String, password: String) -> Result<Media, reqwest::Error> {
     let url = format!("https://ozimage.com.au/wp-json/wp/v2/media/{id}?_fields=alt_text,mime_type,source_url");
@@ -535,10 +537,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .sync(&db)
         .await?;
 
-    let state = Arc::<AppState>::new(AppState {
+    let state = AppState {
         db: Arc::new(db.clone()),
-        last_update: Utc::now()
-    });
+        last_update: Arc::new(Mutex::new(Utc::now()))
+    };
 
     info!("Initializing server...");
 
@@ -877,7 +879,8 @@ async fn get_posts(
             post::Column::Tags,
             post::Column::Coords,
         ])
-        .order_by_desc(post::Column::Date)
+        .order_by(post::Column::Continent, sea_orm::Order::Asc)
+        .order_by(post::Column::Date, sea_orm::Order::Desc)
         .offset(offset)
         .limit(per_page)
         .into_model::<PostListItem>()
@@ -886,6 +889,7 @@ async fn get_posts(
         .unwrap_or_default();
     Json(data)
 }
+
 
 #[debug_handler]
 async fn get_post_ids(State(state): State<Arc<AppState>>) -> Json<Vec<u32>> {
@@ -1092,12 +1096,16 @@ async fn ping() -> String {
     "pong".to_string()
 }
 
-// #[debug_handler]
-// async fn post_update_post() {
-    
-// }
+#[debug_handler]
+async fn post_update_post(State(state): State<Arc<AppState>>, post: Json<Post>) {
+    let id = post.id;
+    Posts::update(post::ActiveModel::from(post.0));
+    let mut lock = state.last_update.lock().unwrap();
+    *lock = Utc::now();
+}
 
 #[debug_handler]
-async fn last_update(state: State<Arc<AppState>>) -> Json<DateTime<Utc>> {
-    Json(state.last_update)
+async fn last_update(state: State<AppState>) -> Json<DateTime<Utc>> {
+    let lock = state.last_update.lock().unwrap();
+    Json(lock.clone())
 }
