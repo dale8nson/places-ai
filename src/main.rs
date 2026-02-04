@@ -1070,8 +1070,6 @@ async fn get_image(State(state): State<Arc<AppState>>, Path(id): Path<u64>) -> J
 }
 
 
-
-
 #[debug_handler]
 async fn get_menu_items(State(state): State<Arc<AppState>>) -> Json<Vec<MenuItem>> {
     let menu_items = MenuItems::find()
@@ -1081,8 +1079,6 @@ async fn get_menu_items(State(state): State<Arc<AppState>>) -> Json<Vec<MenuItem
         .unwrap_or_default();
     Json(menu_items)
 }
-
-
 
 
 #[debug_handler]
@@ -1105,7 +1101,7 @@ async fn post_update_post(State(state): State<Arc<AppState>>, post: Json<Post>) 
 }
 
 #[debug_handler]
-async fn last_update(state: State<AppState>) -> Json<DateTime<Utc>> {
+async fn last_update(State(state): State<Arc<AppState>>) -> Json<DateTime<Utc>> {
     let lock = state.last_update.lock().unwrap();
     Json(lock.clone())
 }
