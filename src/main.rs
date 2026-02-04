@@ -562,7 +562,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .route("/tp5d/{id}", get(get_tp5d))
         .route("/last_update", get(last_update))
         .route("/ping", get(ping))
-        .with_state(state)
+        .with_state(Arc::new(state))
         .route_layer(cors);
         // .layer(TraceLayer::new_for_http());
        
