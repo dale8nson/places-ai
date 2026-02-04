@@ -822,6 +822,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 ))),
             };
 
+            Posts::insert(row).exec(&db).await.unwrap();
+
             // Tp5ds::insert(tp5d::ActiveModel {id:Set(featured_media as i32), fg: Set(format!("data:image/webp;base64,{}", fg.to_base64(STANDARD))), bg: Set(format!("data:image/webp;base64,{}", bg.to_base64(STANDARD))) }).exec(&db).await?;
             // let res = Posts::insert(row).exec(&db).await?;
             // println!("res: {res:?}");
