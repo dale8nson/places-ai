@@ -46,8 +46,8 @@ use crate::entity::{menu_item, post};
 
 // const DATABASE_URL: &str = "sqlite::memory:";
 const DB_NAME: &str = "ozimage";
-const DEFAULT_POSTS_PER_PAGE: u64 = 24;
-const MAX_POSTS_PER_PAGE: u64 = 50;
+const DEFAULT_POSTS_PER_PAGE: u64 = 100;
+const MAX_POSTS_PER_PAGE: u64 = 100;
 
 // async fn open_db() -> Result<DatabaseConnection, DbErr> {
 //     let db = SqlxSqliteConnector::connect(ConnectOptions::new(DATABASE_URL)).await?;
